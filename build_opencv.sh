@@ -8,13 +8,20 @@ readonly PREFIX=/usr/local  # install prefix, (can be ~/.local for a user instal
 readonly DEFAULT_VERSION=4.4.0  # controls the default version (gets reset by the first argument)
 readonly CPUS=$(nproc)  # controls the number of jobs
 
-# better board detection. if it has 6 or more cpus, it probably has a ton of ram too
+# better board detection and swap check
 if [[ $CPUS -gt 5 ]]; then
     # something with a ton of ram
     JOBS=$CPUS
 else
-    JOBS=1  # you can set this to 4 if you have a swap file
-    # otherwise a Nano will choke towards the end of the build
+    # Check if we have swap enabled (at least 2GB)
+    SWAP_AVAILABLE=$(free -m | grep Swap | awk '{print $2}')
+    if [[ $SWAP_AVAILABLE -ge 2048 ]]; then
+        echo "Sufficient swap space detected ($SWAP_AVAILABLE MB). Using 4 jobs for build."
+        JOBS=4  # Use more jobs when swap is available
+    else
+        echo "Limited swap space ($SWAP_AVAILABLE MB). Using 1 job for build to avoid out-of-memory errors."
+        JOBS=1  # Limited - use single job to avoid out-of-memory issues
+    fi
 fi
 
 cleanup () {
@@ -54,7 +61,6 @@ install_dependencies () {
     # package repository or should already be installed (eg. CUDA).
     echo "Installing build dependencies."
     sudo apt-get update
-    sudo apt-get dist-upgrade -y --autoremove
     sudo apt-get install -y \
         build-essential \
         cmake \
@@ -103,14 +109,12 @@ install_dependencies () {
 configure () {
     local CMAKEFLAGS="
         -D BUILD_EXAMPLES=OFF
-        -D BUILD_opencv_python2=ON
         -D BUILD_opencv_python3=ON
         -D CMAKE_BUILD_TYPE=RELEASE
         -D CMAKE_INSTALL_PREFIX=${PREFIX}
-        -D CUDA_ARCH_BIN=5.3,6.2,7.2,8.7
+        -D CUDA_ARCH_BIN=5.3
         -D CUDA_ARCH_PTX=
         -D CUDA_FAST_MATH=ON
-        -D CUDNN_VERSION='8.0'
         -D EIGEN_INCLUDE_PATH=/usr/include/eigen3 
         -D ENABLE_NEON=ON
         -D OPENCV_DNN_CUDA=ON
@@ -140,6 +144,48 @@ configure () {
 }
 
 main () {
+    # Display build configuration
+    echo "OpenCV build configuration:"
+    echo "- Number of CPU cores: $CPUS"
+    echo "- Number of jobs for build: $JOBS"
+    
+    # Check swap space and display info
+    SWAP_SIZE=$(free -h | grep Swap | awk '{print $2}')
+    echo "- Available swap: $SWAP_SIZE"
+    
+    # Verify CUDA Toolkit Installation and set PATH
+    echo "Verifying CUDA installation and setting PATH"
+    if ! command -v nvcc &> /dev/null; then
+        echo "CUDA not found in PATH, attempting to locate and add it"
+        if [ -d "/usr/local/cuda/bin" ]; then
+            export PATH="/usr/local/cuda/bin:$PATH"
+            echo "CUDA found in /usr/local/cuda/bin, PATH updated"
+        elif [ -d "/usr/local/cuda-10.2/bin" ]; then
+            export PATH="/usr/local/cuda-10.2/bin:$PATH"
+            echo "CUDA found in /usr/local/cuda-10.2/bin, PATH updated"
+        elif [ -d "/usr/local/cuda-11.4/bin" ]; then
+            export PATH="/usr/local/cuda-11.4/bin:$PATH"
+            echo "CUDA found in /usr/local/cuda-11.4/bin, PATH updated"
+        else
+            echo "CUDA not found in default locations. Please ensure CUDA is installed correctly."
+            echo "Refer to NVIDIA JetPack SDK Documentation for installation instructions."
+            exit 1
+        fi
+
+        # Update current shell
+        source ~/.bashrc
+
+        # Verify nvcc is now recognized
+        if command -v nvcc &> /dev/null; then
+            echo "nvcc is now recognized"
+            nvcc --version
+        else
+            echo "nvcc still not recognized after updating PATH. Check your CUDA installation."
+            exit 1
+        fi
+    else
+        echo "CUDA is already in PATH"
+    fi
 
     local VER=${DEFAULT_VERSION}
 
@@ -164,6 +210,7 @@ main () {
     fi
 
     # start the build
+    echo "Starting OpenCV build with $JOBS parallel jobs"
     make -j${JOBS} 2>&1 | tee -a build.log
 
     if [[ ${DO_TEST} ]] ; then
